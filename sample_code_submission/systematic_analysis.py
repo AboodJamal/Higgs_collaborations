@@ -28,7 +28,7 @@ def tes_fitter(
 
     def fit_function(array, tes):
         # Dummy fit function, replace with actual fitting procedure
-        return array * tes
+        return [array[i] * f[i](tes) for i in range(len(array))]
 
     return fit_function
 
