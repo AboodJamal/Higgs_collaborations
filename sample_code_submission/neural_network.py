@@ -115,7 +115,7 @@ class NeuralNetwork:
         self.scaler.fit_transform(train_data)
         X_train = self.scaler.transform(train_data)
         self.model.fit(
-            X_train, y_train, sample_weight=weights_train, epochs=5, verbose=2 , callable=[early_stop]
+            X_train, y_train, sample_weight=weights_train, epochs=5, verbose=2 , callbacks=[early_stop]
         )
 
     def predict(self, test_data):
