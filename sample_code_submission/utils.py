@@ -5,6 +5,8 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, roc_curve
+from tensorflow.keras.utils import plot_model
+
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -150,3 +152,20 @@ def roc_curve_wrapper(score, labels, weights, plot_label="model", color="b", lw=
     plt.show()
 
     plt.close()
+    
+
+def visualize_model_architecture(model, filename="nn_architecture.png"):
+    """
+    Saves a visual diagram of a Keras model architecture to a file.
+
+    Args:
+        model (tf.keras.Model): The compiled Keras model.
+        filename (str): Path to save the image (e.g., 'model.png').
+    """
+    try:
+        plot_model(model, to_file=filename, show_shapes=True, show_layer_names=True)
+        print(f"[✔] Saved model visualization to: {filename}")
+    except ImportError as e:
+        print("[✘] Error: Missing 'pydot' or 'graphviz'. Please install them to visualize the model.")
+        print(str(e))
+
