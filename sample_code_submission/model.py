@@ -7,8 +7,35 @@ NN = False
 
 from statistical_analysis import calculate_saved_info, compute_mu
 import numpy as np
+import pandas as pd
+import mlflow
+import mlflow.keras
+import matplotlib.pyplot as plt
+import os
+
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+from systematic_analysis import SystModel
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,  # Set minimum level to INFO (so DEBUG is ignored)
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("app.log"),  # Write logs to file
+        logging.StreamHandler(),  # Also print logs to console
+    ],
+)
+logger = logging.getLogger(__name__)
+from systematic_analysis import SystModel
 
 
+# Dummy preselection logic (does nothing for now)
+class DummyPreselection:
+    def apply_pre_selection(self, dataset, threshold=0.8):
+        return dataset
+
+
+# Main class for training and prediction. Used by the competition ingestion system.
 class Model:
     """
     This is a model class to be submitted by the participants in their submission.
@@ -41,31 +68,30 @@ class Model:
 
     def __init__(self, get_train_set=None, systematics=None, model_type="sample_model"):
         """
-        Model class constructor
-
-        Params:
-            train_set:
-                a dictionary with data, labels, weights and settings
-
-            systematics:
-                a class which you can use to get a dataset with systematics added
-                See sample submission for usage of systematics
-
-
-        Returns:
-            None
+        Initializes model by loading and splitting data,
+        selecting the model type (NN, BDT, or SampleModel),
+        and preparing systematics handler.
         """
 
-        indices = np.arange(15000)
+        indices = np.arange(1400_000)
 
         np.random.shuffle(indices)
 
-        train_indices = indices[:5000]
-        holdout_indices = indices[5000:10000]
-        valid_indices = indices[10000:]
+        train_indices = indices[:500_000]
+        holdout_indices = indices[500_000:900_000]
+        valid_indices = indices[900_000:]
 
+        # Load and split training data
         training_df = get_train_set(selected_indices=train_indices)
+        """
+        {
+        "labels": pd.Series (binary target),
+        "weights": pd.Series (float sample weights),
+        "detailed_labels": pd.Series (str category like 'ttbar'),
+        "data": pd.DataFrame (28 numerical features)
+        }
 
+        """
         self.training_set = {
             "labels": training_df.pop("labels"),
             "weights": training_df.pop("weights"),
@@ -73,6 +99,11 @@ class Model:
             "data": training_df,
         }
 
+        # Flag indicating whether the model has been trained yet.
+        self.istrained = False
+        self.preselection = DummyPreselection()
+
+        # Frees up memory — training_df is no longer needed after its contents were split and stored.
         del training_df
 
         self.systematics = systematics
@@ -143,11 +174,17 @@ class Model:
         if model_type == "BDT":
             from boosted_decision_tree import BoostedDecisionTree
 
-            self.model = BoostedDecisionTree(train_data=self.training_set["data"])
+            self.model = BoostedDecisionTree(name="main")
         elif model_type == "NN":
             from neural_network import NeuralNetwork
 
-            self.model = NeuralNetwork(train_data=self.training_set["data"])
+            self.nn_params = {
+                "layers": [1000, 1000, 1000, 1000, 1000, 1000],
+                "dropout": [0.3, 0.3],
+                "epochs": 30,
+                "batch_size": 32,
+            }
+            self.model = NeuralNetwork(name="main", **self.nn_params)
         elif model_type == "sample_model":
             from sample_model import SampleModel
 
@@ -160,102 +197,248 @@ class Model:
         print(f" Model is { self.name}")
 
     def fit(self):
-        """
-        Params:
-            None
+        mlflow.set_experiment("NN_experiments")
+        # run_name = f"NN_epochs{self.nn_params['epochs']}_bs{self.nn_params['batch_size']} - withSys - with all features"
+        run_name = f"NN - all featurse"
+        with mlflow.start_run(run_name=run_name):
+            # Log model type
+            mlflow.log_param("model_type", self.name)
+            mlflow.log_param("train_samples", len(self.training_set["data"]))
 
-        Functionality:
-            this function can be used to train a model
+            if self.name == "NN":
+                for k, v in self.nn_params.items():
+                    mlflow.log_param(k, v)
 
-        Returns:
-            None
-        """
-
-        balanced_set = self.training_set.copy()
-
-        weights_train = self.training_set["weights"].copy()
-        train_labels = self.training_set["labels"].copy()
-        class_weights_train = (
-            weights_train[train_labels == 0].sum(),
-            weights_train[train_labels == 1].sum(),
-        )
-
-        for i in range(len(class_weights_train)):  # loop on B then S target
-            # training dataset: equalize number of background and signal
-            weights_train[train_labels == i] *= (
-                max(class_weights_train) / class_weights_train[i]
+            # we balance classes here
+            # Balance classes
+            balanced_set = self.training_set.copy()
+            weights_train = self.training_set["weights"].copy()
+            train_labels = self.training_set["labels"].copy()
+            class_weights_train = (
+                weights_train[train_labels == 0].sum(),
+                weights_train[train_labels == 1].sum(),
             )
-            # test dataset : increase test weight to compensate for sampling
 
-        balanced_set["weights"] = weights_train
+            for i in range(len(class_weights_train)):
+                weights_train[train_labels == i] *= (
+                    max(class_weights_train) / class_weights_train[i]
+                )
 
-        self.model.fit(
-            balanced_set["data"], balanced_set["labels"], balanced_set["weights"]
-        )
+            balanced_set["weights"] = weights_train
 
-        self.holdout_set = self.systematics(self.holdout_set)
+            # fitting out model (eg , BDT or NN) with the balanced data
+            # Train model
+            self.model.fit(
+                balanced_set["data"], balanced_set["labels"], balanced_set["weights"]
+            )
 
-        self.saved_info = calculate_saved_info(self.model, self.holdout_set)
+            # Apply systematics
 
-        self.training_set = self.systematics(self.training_set)
+            # Save info
+            self.saved_info = calculate_saved_info(self.model, self.holdout_set)
 
-        # Compute  Results
-        train_score = self.model.predict(self.training_set["data"])
-        train_results = compute_mu(
-            train_score, self.training_set["weights"], self.saved_info
-        )
+            # --- Scores
+            train_score = self.model.predict(self.training_set["data"])
+            holdout_score = self.model.predict(self.holdout_set["data"])
+            valid_score = self.model.predict(self.valid_set["data"])
+            from sklearn.metrics import accuracy_score
 
-        holdout_score = self.model.predict(self.holdout_set["data"])
-        holdout_results = compute_mu(
-            holdout_score, self.holdout_set["weights"], self.saved_info
-        )
+            # After training, calculate accuracy manually on the full training set
+            train_preds = (self.model.predict(self.training_set["data"]) > 0.5).astype(
+                int
+            )
+            train_labels = self.training_set["labels"]
 
-        self.valid_set = self.systematics(self.valid_set)
+            train_acc = accuracy_score(train_labels, train_preds)
+            print(f"Final Train Accuracy: {train_acc:.4f}")
+            mlflow.log_metric("final_train_accuracy", train_acc)
 
-        valid_score = self.model.predict(self.valid_set["data"])
+            valid_preds = (self.model.predict(self.valid_set["data"]) > 0.5).astype(int)
+            valid_labels = self.valid_set["labels"]
+            valid_acc = accuracy_score(valid_labels, valid_preds)
+            mlflow.log_metric("final_valid_accuracy", valid_acc)
 
-        valid_results = compute_mu(
-            valid_score, self.valid_set["weights"], self.saved_info
-        )
+            holdout_preds = (self.model.predict(self.holdout_set["data"]) > 0.5).astype(
+                int
+            )
+            holdout_labels = self.holdout_set["labels"]
+            holdout_acc = accuracy_score(holdout_labels, holdout_preds)
+            mlflow.log_metric("final_holdout_accuracy", holdout_acc)
 
-        print("Train Results: ")
-        for key in train_results.keys():
-            print("\t", key, " : ", train_results[key])
+            # --- mu results
+            train_results = compute_mu(
+                train_score, self.training_set["weights"], self.saved_info
+            )
+            holdout_results = compute_mu(
+                holdout_score, self.holdout_set["weights"], self.saved_info
+            )
+            valid_results = compute_mu(
+                valid_score, self.valid_set["weights"], self.saved_info
+            )
 
-        print("Holdout Results: ")
-        for key in holdout_results.keys():
-            print("\t", key, " : ", holdout_results[key])
+            # --- Print + Log Metrics
+            print("Train Results:")
+            for key, value in train_results.items():
+                print("\t", key, " : ", value)
+                mlflow.log_metric(f"train_{key}", value)
 
-        print("Valid Results: ")
-        for key in valid_results.keys():
-            print("\t", key, " : ", valid_results[key])
+            print("Holdout Results:")
+            for key, value in holdout_results.items():
+                print("\t", key, " : ", value)
+                mlflow.log_metric(f"holdout_{key}", value)
 
-        self.valid_set["data"]["score"] = valid_score
-        from utils import roc_curve_wrapper, histogram_dataset
+            print("Valid Results:")
+            for key, value in valid_results.items():
+                print("\t", key, " : ", value)
+                mlflow.log_metric(f"valid_{key}", value)
 
-        histogram_dataset(
-            self.valid_set["data"],
-            self.valid_set["labels"],
-            self.valid_set["weights"],
-            columns=["score"],
-        )
+            # --- Save score column
+            self.valid_set["data"]["score"] = valid_score
 
-        from HiggsML.visualization import stacked_histogram
+            # --- Plots
+            from utils import (
+                roc_curve_wrapper,
+                histogram_dataset,
+                stacked_histogram,
+                plot_calibration_curve,
+            )
 
-        stacked_histogram(
-            self.valid_set["data"],
-            self.valid_set["labels"],
-            self.valid_set["weights"],
-            self.valid_set["detailed_labels"],
-            "score",
-        )
+            # Create a run folder
+            run_dir = "mlruns_temp"
+            os.makedirs(run_dir, exist_ok=True)
 
-        roc_curve_wrapper(
-            score=valid_score,
-            labels=self.valid_set["labels"],
-            weights=self.valid_set["weights"],
-            plot_label="valid_set" + self.name,
-        )
+            """
+            Plots per-class score distributions (e.g. score of class 0 vs class 1) for the chosen feature(s), like "score".
+            Helps check how well your model separates classes.
+            """
+            # Histogram
+            hist_path = histogram_dataset(
+                self.valid_set["data"],
+                self.valid_set["labels"],
+                self.valid_set["weights"],
+                columns=["score"],
+                save_path=f"{run_dir}/main_histogram.png",
+            )
+            mlflow.log_artifact(hist_path)
+
+            # Stacked histogram
+            stacked_path = stacked_histogram(
+                self.valid_set["data"],
+                self.valid_set["labels"],
+                self.valid_set["weights"],
+                self.valid_set["detailed_labels"],
+                "score",
+                save_path=f"{run_dir}/main_stacked_histogram.png",
+            )
+            mlflow.log_artifact(stacked_path)
+
+            # ROC Curve
+            roc_path = roc_curve_wrapper(
+                score=valid_score,
+                labels=self.valid_set["labels"],
+                weights=self.valid_set["weights"],
+                plot_label="valid_set_" + self.name,
+                save_path=f"{run_dir}/main_roc_curve.png",
+            )
+            mlflow.log_artifact(roc_path)
+            self.valid_set["data"]["score"] = valid_score
+            self.training_set["data"]["score"] = train_score
+            self.holdout_set["data"]["score"] = holdout_score
+
+            labels_train = self.training_set["labels"].values
+            print("Unique labels:", np.unique(labels_train))
+
+            # Count how many 0s and 1s
+            print("Label counts:", np.bincount(labels_train.astype(int)))
+
+            # Check some features stats per label
+            data_train = self.training_set["data"]
+            df = pd.DataFrame(data_train)
+            df["label"] = labels_train
+
+            print(df.groupby("label").describe())
+
+            calib_path = plot_calibration_curve(
+                data_den=self.training_set["data"]["score"].values[
+                    self.training_set["labels"].values == 0
+                ],
+                weight_den=self.training_set["weights"].values[
+                    self.training_set["labels"].values == 0
+                ],
+                data_num=self.training_set["data"]["score"].values[
+                    self.training_set["labels"].values == 1
+                ],
+                weight_num=self.training_set["weights"].values[
+                    self.training_set["labels"].values == 1
+                ],
+                data_denH=self.holdout_set["data"]["score"][
+                    self.holdout_set["labels"] == 0
+                ],
+                weight_denH=self.holdout_set["weights"][
+                    self.holdout_set["labels"] == 0
+                ],
+                data_numH=self.holdout_set["data"]["score"][
+                    self.holdout_set["labels"] == 1
+                ],
+                weight_numH=self.holdout_set["weights"][
+                    self.holdout_set["labels"] == 1
+                ],
+                epsilon=1.0e-20,
+                label="Calibration Curve",
+                score_range="standard",
+                save=f"{run_dir}/main_calibration_curve.pdf",
+            )
+
+            mlflow.log_artifact(calib_path)
+            from IPython.display import Image, display
+
+            display(Image(filename="nn_architecture.png"))
+            mlflow.log_artifact("nn_architecture.png")
+
+            if self.name == "NN" and hasattr(self.model, "history"):
+                history = self.model.history
+                plt.figure(figsize=(10, 6))
+                plt.plot(history["loss"], label="Train Loss")
+                plt.plot(history["val_loss"], label="Validation Loss")
+                plt.title("Loss Curve")
+                plt.xlabel("Epoch")
+                plt.ylabel("Loss")
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(f"{run_dir}/main_loss_curve.png", bbox_inches="tight")
+                mlflow.log_artifact(f"{run_dir}/main_loss_curve.png")
+                plt.close()
+            # --- Save trained model
+            if self.name == "NN":
+                mlflow.keras.log_model(self.model.model, "keras_model")
+
+            self.syst_model = {}
+
+            systs = ["tes"]
+
+            for syst in systs:
+                logger.info("Training syst model for %s", syst)
+                self.syst_model[syst] = SystModel(
+                    NP=syst,
+                    systematics=self.systematics,
+                    preselection=self.preselection,
+                )
+                self.syst_model[syst].systematics_values = [1.1, 0.9]
+                if not self.istrained:
+                    self.syst_model[syst].fit(
+                        holdout_set=self.holdout_set, training_set=self.training_set
+                    )
+                    self.syst_model[syst].save()
+                else:
+                    try:
+                        self.syst_model[syst].load()
+                    except Exception as e:
+                        logger.error("Error loading syst model: %s", e)
+                        self.syst_model[syst].fit(
+                            holdout_set=self.holdout_set, training_set=self.training_set
+                        )
+                        self.syst_model[syst].save()
 
     def predict(self, test_set):
         """
@@ -276,6 +459,8 @@ class Model:
         test_data = test_set["data"]
         test_weights = test_set["weights"]
 
+        if "score" in test_data:
+            test_data.pop("score")
         predictions = self.model.predict(test_data)
 
         result_mu_cal = compute_mu(predictions, test_weights, self.saved_info)

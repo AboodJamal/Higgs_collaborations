@@ -58,8 +58,6 @@ def calculate_saved_info(model, holdout_set):
 
     score = model.predict(holdout_set["data"])
 
-    from systematic_analysis import tes_fitter
-    from systematic_analysis import jes_fitter
 
     print("score shape before threshold", score.shape)
 
@@ -77,8 +75,6 @@ def calculate_saved_info(model, holdout_set):
     saved_info = {
         "beta": beta,
         "gamma": gamma,
-        "tes_fit": tes_fitter(model, holdout_set),
-        "jes_fit": jes_fitter(model, holdout_set),
     }
 
     print("saved_info", saved_info)

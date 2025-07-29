@@ -87,33 +87,31 @@ class NeuralNetwork:
 
     """
 
-    def __init__(self, train_data):
+    def __init__(self, name, layers=[64, 64, 32, 32, 16, 16],dropout=[0.3, 0.3], epochs=30, batch_size=32):
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.dropout = dropout
         self.model = Sequential()
+        self.scaler = StandardScaler()
+        self.name = name
+        self.calibrate = False
 
-        n_dim = train_data.shape[1]
-
-        self.model.add(Dense(64, input_dim=n_dim))
+        self.model.add(Dense(layers[0], input_dim=28))
         self.model.add(BatchNormalization())
-        self.model.add(Dense(64, activation="relu"))
-        self.model.add(Dropout(0.3))
+        self.model.add(Dense(layers[1], activation="relu"))
+        self.model.add(Dropout(dropout[0]))
 
-        self.model.add(Dense(32))
+        self.model.add(Dense(layers[2]))
         self.model.add(BatchNormalization())
-        self.model.add(Dense(32, activation="relu"))
-        self.model.add(Dropout(0.3))
+        self.model.add(Dense(layers[3], activation="relu"))
+        self.model.add(Dropout(dropout[1]))
 
-        self.model.add(Dense(16))
+        self.model.add(Dense(layers[4]))
         self.model.add(BatchNormalization())
-        self.model.add(Dense(16, activation="relu"))
-        self.model.add(Dropout(0.2))
+        self.model.add(Dense(layers[5], activation="relu"))
 
         self.model.add(Dense(1, activation="sigmoid"))
-
-
-        self.model.compile(
-            loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"]
-        )
-        self.scaler = StandardScaler()
+        self.model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"])
 
     def fit(self, train_data, y_train, weights_train=None):
         
@@ -133,18 +131,19 @@ class NeuralNetwork:
         )
         self.scaler.fit(train_data)
         X_train = self.scaler.transform(train_data)
-        self.model.fit(
+        history = self.model.fit(
             X_train,
             y_train,
             sample_weight=weights_train,
             validation_split=0.2,
-            epochs=30,
-            batch_size=32,
+            epochs=self.epochs,
+            batch_size=self.batch_size,
             verbose=2,
             callbacks=[early_stop, reduce_lr]
         )
+        self.history = history.history
+
 
     def predict(self, test_data):
         test_data = self.scaler.transform(test_data)
         return self.model.predict(test_data).flatten().ravel()
-
